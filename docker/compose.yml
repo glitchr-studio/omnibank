@@ -1,0 +1,31 @@
+# glitchr/omnibank with every provider package, your sandbox keys in .env:
+#
+#   cp .env.dist .env                                          # fill in the keys at hand
+#   docker compose run --rm omnibank gateways                  # which providers are installed and configured
+#   docker compose run --rm omnibank connect powens            # the page to open; the connection kept
+#   docker compose run --rm omnibank accounts qonto
+#   docker compose run --rm omnibank balances qonto
+#   docker compose run --rm omnibank transactions qonto --since 2026-09-01
+#   docker compose run --rm -v ~/Downloads:/statements omnibank transactions files --path /statements/releve.xml
+#   docker compose run --rm omnibank test                      # every package's tests
+#
+# Providers come from GitHub (branch 1.x) unless their checkout sits under
+# OMNIBANK_PLUGINS (set it to ../.. in .env when this core sits in the
+# workspace beside them): then that checkout is what runs. The connections
+# (tokens, users) are kept in the harness volume, /harness/connections.
+name: omnibank
+
+services:
+  omnibank:
+    build: .
+    image: glitchr/omnibank-harness
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ..:/omnibank/core
+      - ${OMNIBANK_PLUGINS:-./plugins}:/omnibank/plugins:ro
+      - harness:/harness
+
+volumes:
+  harness:
