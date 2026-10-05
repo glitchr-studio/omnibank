@@ -1,0 +1,149 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Omnibank in bare PHP: no bundle, no container, no console component. The
+ * registry is built by hand from the provider packages installed, each
+ * gateway that can be built says what it does, a CAMT.053 statement is read
+ * through omnibank/files - no network - and Qonto is asked for the
+ * organization's accounts, the first one's balances and its transactions of
+ * September 2026; then the script lists what PHP loaded on the way.
+ *
+ *   docker compose run --rm omnibank bare              # exits 1 when a class of a framework was loaded
+ *   docker compose run --rm omnibank bare --recorded   # Qonto on the answers kept in recorded/ instead of the calls
+ *   docker compose run --rm omnibank bare --json       # the same, whole: every class and file loaded
+ *
+ * Without --recorded the gateways are those of .env, and Qonto is asked only
+ * when QONTO_LOGIN and QONTO_SECRET_KEY are set. The answers in recorded/
+ * were written from Qonto's published documentation (omnibank/qonto's own
+ * fixtures): the organization, the IBANs and the names are made up.
+ *
+ * OMNIBANK_AUTOLOAD names another autoloader than the harness's.
+ */
+
+use Omnibank\GatewayInterface;
+use Omnibank\Model\Balance;
+use Omnibank\Model\Connection;
+use Omnibank\Registry;
+use Omnibank\Request;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
+
+require getenv('OMNIBANK_AUTOLOAD') ?: '/harness/vendor/autoload.php';
+
+$recorded = \in_array('--recorded', $argv, true);
+$http = !$recorded ? null : new MockHttpClient(static function (string $method, string $url): MockResponse {
+    parse_str((string) parse_url($url, \PHP_URL_QUERY), $query);
+    $file = match ((string) parse_url($url, \PHP_URL_PATH)) {
+        '/v2/organization' => 'qonto-organization.json',
+        '/v2/transactions' => 'qonto-transactions-page-'.(int) ($query['current_page'] ?? 1).'.json',
+        default => null,
+    };
+    $file = null === $file ? null : __DIR__.'/../recorded/'.$file;
+
+    return null !== $file && is_file($file)
+        ? new MockResponse((string) file_get_contents($file), ['response_headers' => ['Content-Type: application/json']])
+        : new MockResponse('{"errors":[{"code":"not_found","detail":"Not found"}]}', ['http_code' => 404]);
+});
+
+// A provider that calls an API takes the HTTP client to call with; omnibank/files calls nothing and takes none.
+$factories = [];
+foreach (require __DIR__.'/../plugins.php' as $slug => [, $class]) {
+    if (class_exists($class)) {
+        $factories[] = 'files' === $slug ? new $class() : new $class($http ??= HttpClient::create(['timeout' => 30]));
+    }
+}
+$installed = array_map(static fn ($factory) => $factory->getName(), $factories);
+
+if ($recorded) {
+    // Manifestly not credentials: nothing is called.
+    $config = [
+        'files' => ['factory' => 'files'],
+        'qonto' => ['factory' => 'qonto', 'options' => ['login' => 'example-organization', 'secret_key' => 'qonto_test_not_a_real_key']],
+    ];
+} else {
+    $set = static fn (string $key): bool => false !== getenv($key) && '' !== getenv($key);
+    $config = array_filter(require __DIR__.'/../config/gateways.php', static fn (array $gateway) => !array_filter($gateway['needs'], static fn (string $key) => !$set($key)));
+    $config = array_map(static fn (array $gateway) => ['factory' => $gateway['factory'], 'options' => array_filter($gateway['options'], static fn ($value) => null !== $value)], $config);
+}
+$config = array_filter($config, static fn (array $gateway) => \in_array($gateway['factory'], $installed, true));
+$registry = new Registry($factories, $config);
+
+$requests = ['connect' => Request\Connect::class, 'accounts' => Request\FetchAccounts::class, 'balances' => Request\FetchBalances::class, 'transactions' => Request\FetchTransactions::class, 'transfer' => Request\Transfer::class, 'notify' => Request\Notify::class];
+$report = ['recorded' => $recorded, 'factories' => $registry->factories(), 'gateways' => [], 'statement' => null, 'qonto' => null];
+foreach ($registry->all() as $name => $gateway) {
+    $report['gateways'][$name] = array_keys(array_filter($requests, static fn (string $class) => $gateway->supports($class)));
+}
+
+// One account as a gateway gives it: what it is, its balances by type, its transactions from $since to $until.
+$read = static function (GatewayInterface $gateway, Connection $connection, ?DateTimeImmutable $since = null, ?DateTimeImmutable $until = null): array {
+    $accounts = $gateway->accounts($connection);
+    if (!$accounts) {
+        return ['accounts' => 0];
+    }
+    $balances = $gateway->balances($connection, $accounts[0]);
+    $transactions = $gateway->transactions($connection, $accounts[0], $since, $until);
+
+    return [
+        'accounts' => \count($accounts),
+        'account' => ['name' => $accounts[0]->name, 'iban' => $accounts[0]->iban, 'bic' => $accounts[0]->bic, 'currency' => $accounts[0]->currency],
+        'balances' => array_combine(array_map(static fn (Balance $b) => $b->type, $balances), array_map(static fn (Balance $b) => $b->amount->decimal(), $balances)),
+        'transactions' => \count($transactions),
+        'first' => !$transactions ? null : ['on' => $transactions[0]->bookedOn->format('Y-m-d'), 'amount' => $transactions[0]->amount->decimal(), 'counterparty' => $transactions[0]->counterpartyName, 'reference' => $transactions[0]->reference],
+    ];
+};
+
+if ($registry->has('files')) {
+    $statement = ['name' => 'statement-camt053.xml', 'content' => (string) file_get_contents(__DIR__.'/../recorded/statement-camt053.xml')];
+    $report['statement'] = $read($registry->get('files'), new Connection(['statements' => [$statement]]));
+}
+if ($registry->has('qonto')) {
+    $report['qonto'] = $read($registry->get('qonto'), new Connection(), new DateTimeImmutable('2026-09-01'), new DateTimeImmutable('2026-09-30'));
+}
+
+// What PHP loaded to get there: the proof that no framework was needed.
+$report['symbols'] = [...get_declared_classes(), ...get_declared_interfaces(), ...get_declared_traits()];
+$report['files'] = get_included_files();
+$framework = array_values(preg_grep('~^(?:Symfony\\\\Component\\\\(?:DependencyInjection|Config|HttpKernel|HttpFoundation)|Symfony\\\\Bundle|Doctrine|Twig)\\\\~', $report['symbols']));
+$symfony = array_values(array_unique(array_map(static fn (string $s) => implode('\\', \array_slice(explode('\\', $s), 0, 3)), preg_grep('~^Symfony\\\\(?!Polyfill)~', $report['symbols']))));
+sort($symfony);
+
+if (\in_array('--json', $argv, true)) {
+    echo json_encode($report, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE), "\n";
+    exit($framework ? 1 : 0);
+}
+
+$print = static function (array $read): void {
+    if (!isset($read['account'])) {
+        echo "  no account\n";
+
+        return;
+    }
+    printf("  %s, %s (%s), %s - %d account%s\n", $read['account']['name'], $read['account']['iban'] ?? 'no IBAN', $read['account']['bic'] ?? 'no BIC', $read['account']['currency'], $read['accounts'], 1 === $read['accounts'] ? '' : 's');
+    printf("  balances: %s\n", implode(', ', array_map(static fn (string $type, string $amount) => "$type $amount", array_keys($read['balances']), $read['balances'])) ?: 'none');
+    printf("  %d transaction%s", $read['transactions'], 1 === $read['transactions'] ? '' : 's');
+    if ($first = $read['first']) {
+        printf(', the first on %s: %s %s, %s', $first['on'], $first['amount'], $read['account']['currency'], implode(', ', array_filter([$first['counterparty'], $first['reference']])) ?: 'no label');
+    }
+    echo "\n";
+};
+
+echo "Omnibank in bare PHP: the registry built by hand, no bundle, no container.\n\n";
+foreach ($report['gateways'] as $name => $does) {
+    printf("  %-10s %s\n", $name, implode(' ', $does));
+}
+if (!$report['gateways']) {
+    echo $installed ? "  no gateway is configured\n" : "  no omnibank/* provider package is installed\n";
+}
+if ($report['statement']) {
+    echo "\nomnibank/files, the CAMT.053 statement kept in recorded/ (no network):\n";
+    $print($report['statement']);
+}
+if ($report['qonto']) {
+    echo "\nomnibank/qonto, ", $recorded ? 'from the answers kept in recorded/' : 'asked of Qonto', ", September 2026:\n";
+    $print($report['qonto']);
+}
+echo "\nLoaded from Symfony: ", implode(', ', $symfony) ?: 'nothing', "\n";
+echo 'Classes of a framework (DependencyInjection, Config, HttpKernel, HttpFoundation, a bundle, Doctrine, Twig): ', $framework ? implode(', ', $framework) : 'none', "\n";
+exit($framework ? 1 : 0);

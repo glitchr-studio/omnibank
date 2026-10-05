@@ -7,6 +7,7 @@
 #   docker compose run --rm omnibank balances qonto
 #   docker compose run --rm omnibank transactions qonto --since 2026-09-01
 #   docker compose run --rm -v ~/Downloads:/statements omnibank transactions files --path /statements/releve.xml
+#   docker compose run --rm omnibank bare                      # plain PHP: no bundle, no container, and what PHP loaded
 #   docker compose run --rm omnibank test                      # every package's tests
 #
 # Providers come from GitHub (branch 1.x) unless their checkout sits under
