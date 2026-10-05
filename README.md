@@ -19,7 +19,9 @@ $gateway->notify($request->getContent(), $request->headers->all());   // a webho
 ```
 
 This package holds the contract (`GatewayInterface`, `GatewayFactory`, `Registry`), the models,
-the requests and the Symfony bundle. Each provider is a package of its own:
+the requests and a bridge for Symfony. It needs no framework: it requires nothing but
+`symfony/http-client-contracts`; a provider that calls an API requires `symfony/http-client`,
+`omnibank/files` neither. Each provider is a package of its own:
 
 | Package | Provider |
 |---|---|
@@ -27,6 +29,37 @@ the requests and the Symfony bundle. Each provider is a package of its own:
 | `omnibank/qonto` | Qonto: accounts, balances, transactions with an API key (unverified) |
 | `omnibank/powens` | Powens: bank aggregation through its Webview, CONNECTION_SYNCED webhooks (unverified) |
 | `omnibank/bridge` | Bridge API v3: bank aggregation through Connect sessions, item webhooks (unverified) |
+
+## Plain PHP
+
+```sh
+composer require glitchr/omnibank omnibank/files
+```
+
+```php
+require __DIR__.'/vendor/autoload.php';
+
+use Omnibank\Files\FilesGatewayFactory;
+use Omnibank\Model\Connection;
+use Omnibank\Registry;
+
+$registry = new Registry([new FilesGatewayFactory()], ['statements' => ['factory' => 'files']]);
+$gateway = $registry->get('statements');
+
+$connection = new Connection(['statements' => [['name' => 'releve.xml', 'content' => file_get_contents('releve.xml')]]]);
+foreach ($gateway->accounts($connection) as $account) {
+    foreach ($gateway->transactions($connection, $account) as $transaction) {
+        echo $transaction->bookedOn->format('Y-m-d'), ' ', $transaction->amount->decimal(), ' ', $transaction->label, "\n";
+    }
+}
+```
+
+A provider that calls an API takes the HTTP client to call with - the application's, a
+`MockHttpClient` in a test - and makes its own when given none:
+`new Registry([new QontoGatewayFactory($http)], ['treasury' => ['factory' => 'qonto', 'options' => [...]]])`.
+A whole script that runs as it is, and the rest: [docs/installation.md](docs/installation.md).
+No class of a framework is loaded on the way: `Tests/BareTest.php` checks it in a process of its
+own, and so does `docker compose run --rm omnibank bare`.
 
 ## The models
 
@@ -59,8 +92,11 @@ What every provider answers with is kept whole in `$raw`: normalization loses no
 
 ## Symfony
 
-`Omnibank\Bridge\Symfony\OmnibankBundle`: every `omnibank/*` provider installed registered,
-`Omnibank\Registry` autowired, and each configured gateway injectable by its name.
+In a Symfony application, `Omnibank\Bridge\Symfony\OmnibankBundle` does the wiring: every
+`omnibank/*` provider installed registered on the application's `http_client`, `Omnibank\Registry`
+autowired, and each configured gateway injectable by its name. Its components (`symfony/config`,
+`symfony/dependency-injection`, `symfony/http-kernel`) are not required by this package: the
+application has them ([docs/symfony.md](docs/symfony.md)).
 
 ```yaml
 omnibank:
@@ -89,7 +125,14 @@ docker compose run --rm omnibank connect powens                       # prints t
 docker compose run --rm omnibank accounts powens
 docker compose run --rm omnibank transactions qonto --since 2026-09-01
 docker compose run --rm -v ~/Downloads:/statements omnibank transactions files --path /statements/releve.xml
+docker compose run --rm omnibank bare                                 # plain PHP: no bundle, no container, and what PHP loaded
 docker compose run --rm omnibank test                                 # every package's tests
 ```
+
+## Documentation
+
+- [Installation and first calls](docs/installation.md): plain PHP first
+- [Symfony](docs/symfony.md)
+- [The Docker harness](docs/harness.md)
 
 License: LGPL-3.0-or-later.
