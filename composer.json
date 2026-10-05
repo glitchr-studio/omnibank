@@ -30,18 +30,21 @@
         "symfony/http-kernel": "^6.4|^7.0|^8.0"
     },
     "suggest": {
-        "symfony/http-client": "The HTTP client the providers talk through",
         "omnibank/files": "Statement files: CAMT.053, OFX, CSV read; SEPA credit transfers written as pain.001",
         "omnibank/qonto": "Qonto: accounts, balances and transactions with an API key",
         "omnibank/powens": "Powens (ex Budget Insight): bank aggregation through its Webview, webhooks",
-        "omnibank/bridge": "Bridge (bridgeapi.io): bank aggregation through its Connect sessions, webhooks"
+        "omnibank/bridge": "Bridge (bridgeapi.io): bank aggregation through its Connect sessions, webhooks",
+        "symfony/config": "In a Symfony application: the configuration of Omnibank\\Bridge\\Symfony\\OmnibankBundle",
+        "symfony/dependency-injection": "In a Symfony application: the services of Omnibank\\Bridge\\Symfony\\OmnibankBundle",
+        "symfony/http-kernel": "In a Symfony application: Omnibank\\Bridge\\Symfony\\OmnibankBundle itself"
     },
     "autoload": {
         "psr-4": {
             "Omnibank\\": ""
         },
         "exclude-from-classmap": [
-            "/Tests/"
+            "/Tests/",
+            "/docker/"
         ]
     },
     "autoload-dev": {
